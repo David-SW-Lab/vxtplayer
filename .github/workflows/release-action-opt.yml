@@ -1,0 +1,351 @@
+name: Build and release optimised vxtplayer to S3
+
+env:
+    All: 'All'
+    Tizen: 'Tizen'
+    Android: 'Android'
+    Windows: 'Windows'
+    Brightsign: 'Brightsign'
+    Fedora: 'Fedora'
+    Web: 'Web'
+
+permissions:
+    id-token: write
+    contents: read
+
+on:
+    workflow_dispatch:
+        inputs:
+            infra:
+                description: 'Select infrastructure'
+                required: true
+                default: 'dev2'
+                type: choice
+                options:
+                    - dev
+                    - dev2
+                    - int
+                    - stg
+                    - stg2
+                    # - prd # disabled for now
+
+            platform:
+                description: 'Select platform'
+                required: true
+                default: 'All'
+                type: choice
+                options:
+                    - 'All'
+                    - 'Tizen'
+                    - 'Android'
+                    - 'Windows'
+                    - 'Brightsign'
+                    - 'Fedora'
+                    - 'Web'
+
+            publish:
+                description: 'Publish to AWS S3? (true/false)'
+                required: true
+                default: true
+                type: boolean
+
+            alpha:
+                description: 'Input screenIds for Alpha test release'
+                required: false
+                default: ''
+                type: string
+
+jobs:
+    setup:
+        name: Setup Dependencies
+        runs-on: srpol-win-build
+        outputs:
+            build-matrix: ${{ steps.set-matrix.outputs.matrix }}
+        steps:
+            - name: Set git to use LF
+              run: |
+                git config --global core.autocrlf false
+                git config --global core.eol lf
+
+            - name: Check out repository code
+              uses: actions/checkout@v4
+
+            - name: 🔎 Check IPs
+              shell: cmd
+              run: |
+                curl -4 icanhazip.com
+                echo ;
+                curl ipinfo.io/ip
+                echo ;
+                curl https://api.ipify.org
+
+            - name: List inputs
+              shell: cmd
+              run: |
+                echo Branch: ${{ github.ref_name }}
+                echo Infra: ${{ github.event.inputs.infra }}
+                echo Alpha devices: ${{ github.event.inputs.alpha }}
+                echo Selected platform: ${{ github.event.inputs.platform }}
+                echo Publish to AWS S3: ${{ github.event.inputs.publish }}
+
+            - name: Setup Artifactory
+              shell: cmd
+              run: |
+                echo @supernova:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @vxt:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @rmplayer:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:_password=${{ secrets.JFROG_AUTH }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:username=${{ secrets.JFROG_USERNAME }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:email=${{ secrets.JFROG_USERNAME }}@samsung.com >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:always-auth=true >> .npmrc
+
+            - name: NPM install
+              run: npm i
+
+            - name: Determine build matrix
+              id: set-matrix
+              shell: pwsh
+              run: |
+                $platformInput = "${{ github.event.inputs.platform }}"
+                $matrix = @()
+                if ($platformInput -eq "${{ env.All }}" -or $platformInput -eq "${{ env.Web }}") { $matrix += "${{ env.Web }}" }
+                if ($platformInput -eq "${{ env.All }}" -or $platformInput -eq "${{ env.Tizen }}") { $matrix += "${{ env.Tizen }}" }
+                if ($platformInput -eq "${{ env.All }}" -or $platformInput -eq "${{ env.Android }}") { $matrix += "${{ env.Android }}" }
+                if ($platformInput -eq "${{ env.All }}" -or $platformInput -eq "${{ env.Windows }}") { $matrix += "${{ env.Windows }}" }
+                if ($platformInput -eq "${{ env.All }}" -or $platformInput -eq "${{ env.Brightsign }}") { $matrix += "${{ env.Brightsign }}" }
+                if ($platformInput -eq "${{ env.All }}" -or $platformInput -eq "${{ env.Fedora }}") { $matrix += "${{ env.Fedora }}" }
+                $matrixJson = $matrix | ConvertTo-Json -Compress
+                echo "matrix=$matrixJson" >> $env:GITHUB_OUTPUT
+
+    build-platform:
+        name: Build ${{ matrix.platform }}
+        runs-on: srpol-win-build
+        needs: setup
+        timeout-minutes: 60 # Adjusted timeout for individual jobs
+        strategy:
+          fail-fast: false # Don't cancel all jobs if one fails
+          matrix:
+            platform: ${{ fromJson(needs.setup.outputs.build-matrix) }}
+        steps:
+            - name: Set git to use LF
+              run: |
+                git config --global core.autocrlf false
+                git config --global core.eol lf
+
+            - name: Check out repository code
+              uses: actions/checkout@v4
+
+            - name: Setup Artifactory
+              shell: cmd
+              run: |
+                echo @supernova:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @vxt:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @rmplayer:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:_password=${{ secrets.JFROG_AUTH }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:username=${{ secrets.JFROG_USERNAME }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:email=${{ secrets.JFROG_USERNAME }}@samsung.com >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:always-auth=true >> .npmrc
+
+            - name: NPM install
+              run: npm i
+
+            - name: Build for Web
+              if: matrix.platform == env.Web
+              shell: cmd
+              run: |
+                npm run setup -- platform=web
+                npx cordova prepare browser
+                npx cordova build browser
+                if not exist "./artifacts/www" mkdir "./artifacts/www"
+                xcopy /E /I /Y ".\platforms\browser\www\*" ".\artifacts\www\"
+                dir /s artifacts
+
+            - name: Build for Tizen
+              if: matrix.platform == env.Tizen
+              shell: cmd
+              run: |
+                powershell -Command "(Get-Content ./settings/tizen-settings-template.js) -replace '\[CERTIFICATE NAME HERE\]', 'vxt-user' | Set-Content ./settings/tizen-settings-template.js"
+                powershell -Command "(Get-Content ./settings/tizen-settings.js) -replace '\[CERTIFICATE NAME HERE\]', 'vxt-user' | Set-Content ./settings/tizen-settings.js"
+                if not exist "./artifacts/Tizen" mkdir "./artifacts/Tizen"
+                # Build Legacy Tizen
+                npm run setup -- platform=tizen version=4
+                npx cordova prepare tizen
+                npx cordova build tizen
+                ren platforms\tizen tizen4
+                xcopy /Y ".\platforms\tizen4\build\*.wgt" ".\artifacts\Tizen\"
+                # Build Tizen
+                npm run setup -- platform=tizen
+                npx cordova prepare tizen
+                npx cordova build tizen
+                xcopy /Y ".\platforms\tizen\build\*.wgt" ".\artifacts\Tizen\"
+                dir /s artifacts
+
+            - name: Build for Electron (Windows)
+              if: matrix.platform == env.Windows
+              shell: cmd
+              run: |
+                npm run electron:build
+                if not exist "./artifacts/Windows" mkdir "./artifacts/Windows"
+                xcopy /Y ".\resources\electron\build\*.exe" ".\artifacts\Windows\"
+                xcopy /Y ".\resources\electron\build\*.yml" ".\artifacts\Windows\"
+                dir /s artifacts
+
+            - name: Build for Brightsign
+              if: matrix.platform == env.Brightsign
+              shell: cmd
+              run: |
+                npm run brightsign:build
+                if not exist "./artifacts/Brightsign" mkdir "./artifacts/Brightsign"
+                xcopy /Y ".\resources\brightsign\release\*.zip" ".\artifacts\Brightsign\"
+                dir /s artifacts
+
+            - name: Fedora prepare
+              if: matrix.platform == env.Fedora
+              uses: Vampire/setup-wsl@v6
+              with:
+                distribution: Ubuntu-24.04
+                use-cache: 'false'
+                wsl-version: 1
+
+            - name: Build for Fedora (Electron Linux)
+              if: matrix.platform == env.Fedora
+              shell: wsl-bash_Ubuntu-24.04 {0}
+              run: |
+                # This build runs in WSL, so it needs its own npm install
+                # Artifactory .npmrc is not automatically available in WSL, needs to be copied or recreated
+                cp ../.npmrc . # Assuming .npmrc is in the root of the workspace on Windows
+                ./build-scripts/install-required-packages-fedora.sh
+                export VOLTA_HOME="$HOME/.volta"
+                export PATH="$VOLTA_HOME/bin:$PATH"
+                npm i
+                npm run electron:build:linux
+                mkdir -p ../artifacts/Fedora # Artifacts should be in the workspace root
+                cp ./resources/electron/build/*.rpm ../artifacts/Fedora/
+                ls ../artifacts/
+
+            - name: Build for Android
+              if: matrix.platform == env.Android
+              shell: cmd
+              run: |
+                npm run android:prepare
+                npx cordova prepare android
+                npx cordova build android
+                if not exist "./artifacts/Android" mkdir "./artifacts/Android"
+                xcopy /Y ".\platforms\android\app\build\outputs\apk\debug\*.apk" ".\artifacts\Android\"
+                dir /s artifacts
+
+            - name: Upload ${{ matrix.platform }} artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                name: ${{ matrix.platform }}-artifact
+                path: |
+                    artifacts/
+
+    upload-to-s3:
+        name: Upload to S3
+        if: ${{ github.event.inputs.publish == 'true' }}
+        runs-on: srpol-win-build
+        needs: build-platform
+        steps:
+            - name: Download all artifacts
+              uses: actions/download-artifact@v4
+              with:
+                path: all-artifacts/ # Downloads all artifacts into a sub-directory
+
+            - name: Flatten artifacts (optional, if structure needs to be like before)
+              shell: pwsh
+              run: |
+                Get-ChildItem -Path "all-artifacts" -Directory | ForEach-Object {
+                    $platformName = $_.Name
+                    $sourcePath = Join-Path "all-artifacts" $platformName "artifacts" # Assuming inner 'artifacts' folder
+                    $destPath = Join-Path "artifacts" $platformName.Replace("-artifact", "")
+                    if (Test-Path $sourcePath) {
+                        New-Item -ItemType Directory -Path $destPath -Force
+                        Copy-Item -Path "$sourcePath\*" -Destination $destPath -Recurse -Force
+                    }
+                }
+                Get-ChildItem -Path artifacts/ -Recurse # Show final structure
+
+            - name: Configure AWS Credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-region: ${{ github.event.inputs.infra == 'dev' && 'ap-northeast-1' || github.event.inputs.infra == 'int' && 'ap-northeast-1' || github.event.inputs.infra == 'dev2' && 'ap-southeast-1' || github.event.inputs.infra == 'stg' && 'us-east-1' || github.event.inputs.infra == 'stg2' && 'eu-west-3' || 'eu-central-1'}}
+                  role-to-assume: ${{ github.event.inputs.infra == 'dev' && secrets.DEV_AWS_ROLE || github.event.inputs.infra == 'dev2' && secrets.DEV_AWS_ROLE || github.event.inputs.infra == 'int' && secrets.STG_AWS_ROLE || github.event.inputs.infra == 'stg' && secrets.STG_AWS_ROLE || github.event.inputs.infra == 'stg2' && secrets.STG_AWS_ROLE || 'none'}}
+                  role-session-name: github-oidc-session
+
+            - name: Copy to bucket on AWS S3
+              shell: powershell
+              run: |
+                  $UTC_DATE_TIME = Get-Date -Format "yyyyMMdd.HHmm"
+                  echo "UTC time: $UTC_DATE_TIME"
+                  $INFRA = "${{ github.event.inputs.infra }}"
+                  if ($INFRA -eq "dev") { $REGION = "ap-northeast-1" }
+                    elseif ($INFRA -eq "int") { $REGION = "ap-northeast-1" }
+                    elseif ($INFRA -eq "dev2") { $REGION = "ap-southeast-1" }
+                    elseif ($INFRA -eq "stg") { $REGION = "us-east-1" }
+                    elseif ($INFRA -eq "stg2") { $REGION = "eu-west-3" }
+                    else { $REGION = "eu-central-1" }
+                  $BUCKET_ID = "fcms-player-artifacts-bucket-$INFRA-$REGION"
+                  $WEB_PLAYER_BUCKET_ID = "fcms-web-player-bucket-$INFRA-$REGION"
+                  echo ***********************
+                  echo ** Available buckets **
+                  echo ***********************
+                  aws s3 ls
+                  echo *************************************
+                  echo ** Contents of bucket $BUCKET_ID **
+                  echo *************************************
+                  aws s3 ls s3://$BUCKET_ID
+                  echo ** Contents of bucket $WEB_PLAYER_BUCKET_ID **
+                  echo *************************************
+                  aws s3 ls s3://$WEB_PLAYER_BUCKET_ID
+                  echo ***************
+                  echo ** Do backup **
+                  echo ***************
+                  aws s3 cp s3://$BUCKET_ID s3://$BUCKET_ID/backup/$UTC_DATE_TIME --recursive --exclude "backup/*" --expires 2099-01-01T20:30:00Z
+                  aws s3 cp s3://$WEB_PLAYER_BUCKET_ID s3://$WEB_PLAYER_BUCKET_ID/backup/$UTC_DATE_TIME --recursive --exclude "backup/*" --expires 2099-01-01T20:30:00Z
+                  echo *****************************
+                  echo ** Uploading new artifacts **
+                  echo *****************************
+                  if (Test-Path -Path artifacts\www) {(aws s3 rm s3://$WEB_PLAYER_BUCKET_ID --recursive --exclude "backup/*") -and (aws s3 cp artifacts\www s3://$WEB_PLAYER_BUCKET_ID --recursive)}
+                  if (Test-Path -Path artifacts\Tizen) {aws s3 cp artifacts\Tizen s3://$BUCKET_ID/Tizen --recursive}
+                  if (Test-Path -Path artifacts\Windows) {aws s3 cp artifacts\Windows s3://$BUCKET_ID/Windows --recursive}
+                  if (Test-Path -Path artifacts\Brightsign) {aws s3 cp artifacts\Brightsign s3://$BUCKET_ID/Brightsign --recursive}
+                  if (Test-Path -Path artifacts\Android) {aws s3 cp artifacts\Android s3://$BUCKET_ID/Android --recursive}
+                  # Note: Fedora artifacts are not currently uploaded to S3 in the original script.
+                  # If they need to be, add a condition here for artifacts\Fedora
+
+    publish-yml:
+        name: Publish YML file to infra bucket
+        runs-on: srpol-win-build
+        needs: upload-to-s3 # Ensure S3 upload is complete before publishing YML
+        if: ${{ github.event.inputs.publish == 'true' && ( github.event.inputs.platform == env.All ||  github.event.inputs.platform == env.Android || github.event.inputs.platform == env.Windows ||  github.event.inputs.platform == env.Brightsign )}}
+        timeout-minutes: 40
+        steps:
+            - name: Set git to use LF
+              run: |
+                git config --global core.autocrlf false
+                git config --global core.eol lf
+
+            - name: Publish Windows info to backend
+              if: ${{ github.event.inputs.platform == env.All || github.event.inputs.platform == env.Windows }}
+              shell: cmd
+              run: |
+                set VITE_INFRA=${{ github.event.inputs.infra }}
+                set ALPHA=${{ github.event.inputs.alpha }}
+                npm run electron:publishYml
+
+            - name: Publish Android info to backend
+              if: ${{ github.event.inputs.platform == env.All ||  github.event.inputs.platform == env.Android }}
+              shell: cmd
+              run: |
+                set VITE_INFRA=${{ github.event.inputs.infra }}
+                set ALPHA=${{ github.event.inputs.alpha }}
+                npm run android:publishYml
+
+            - name: Publish Brightsign info to backend
+              if: ${{ github.event.inputs.platform == env.All || github.event.inputs.platform == env.Brightsign }}
+              shell: cmd
+              run: |
+                set VITE_INFRA=${{ github.event.inputs.infra }}
+                set ALPHA=${{ github.event.inputs.alpha }}
+                npm run brightsign:publishYml

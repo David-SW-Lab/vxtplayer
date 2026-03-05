@@ -1,0 +1,104 @@
+name: Github Actions
+on: [push]
+jobs:
+  build:
+    runs-on: [ code-linux, code-large ]
+    container:
+      image: ubuntu:22.04
+      options: --user root
+    timeout-minutes: 30
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '18.12.1'
+
+      - name: Setup npm version
+        run: npm install -g npm@8.3.1
+
+      - name: Install container dependencies
+        run: apt-get update && apt-get install git openssh-client -y
+
+      - name: Check out repository code
+        uses: actions/checkout@v2
+
+      - name: Setup SSH keys and known_hosts
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          mkdir $HOME/.ssh
+          echo "${{ secrets.GITHUBACTIONS }}" > $HOME/.ssh/github_actions
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > $HOME/.ssh/ssh_private_key
+          echo "${{ secrets.VXU }}" > $HOME/.ssh/ssh_vxu
+          chmod 600 $HOME/.ssh/github_actions
+          chmod 600 $HOME/.ssh/ssh_private_key
+          chmod 600 $HOME/.ssh/ssh_vxu
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+          ssh-add $HOME/.ssh/github_actions
+          ssh-add $HOME/.ssh/ssh_private_key
+          ssh-add $HOME/.ssh/ssh_vxu
+
+
+      - name: Setup Artifactory
+        run: |
+          echo "@supernova:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/" >> .npmrc
+          echo "@vxt:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/" >> .npmrc
+          echo "@rmplayer:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:_password=${{ secrets.JFROG_AUTH }}" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:username=${{ secrets.JFROG_USERNAME }}" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:email=${{ secrets.JFROG_USERNAME }}@samsung.com" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:always-auth=true" >> .npmrc
+
+      - name: Install
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true'
+        run: npm install
+
+      - name: Build rm-player and run tests for windows platform
+        working-directory: ./libs/rmplayer
+        run: |
+            npm run build:android
+            npm run build:windows
+            npm run test
+
+      - name: Setup platform/player
+        run: npm run setup -- platform=web player=vxplayer
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test:coverage
+
+      - name: Create www directory
+        run: mkdir -p www
+
+      - name: Cordova prepare
+        run: npx cordova prepare
+
+      - name: Build
+        run: npx cordova build browser
+
+      - name: Archive coverage
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage
+          path: coverage
+
+      - name: Archive test_results
+        uses: actions/upload-artifact@v3
+        with:
+          name: test_results
+          path: test_results
+
+      - name: Show logs
+        if: always()
+        run: |
+          search_dir=/github/home/.npm/_logs/
+          for entry in "$search_dir"/*
+          do
+            echo "$entry"
+            cat "$entry"
+          done

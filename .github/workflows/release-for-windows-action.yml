@@ -1,0 +1,130 @@
+name: Release for Windows
+on:
+    workflow_dispatch:
+        inputs:
+            infra:
+                description: 'Select infrastructure'
+                required: true
+                default: 'dev2'
+                type: choice
+                options:
+                    - dev
+                    - dev2
+                    - int
+                    - stg
+                    - stg2
+                    # - prd # disabled for now
+            alpha:
+                description: 'Input screenIds for Alpha test release'
+                required: false
+                default: ''
+                type: string 
+
+jobs:
+    build-windows:
+        name: Build all platforms on Windows runner
+        runs-on: srpol-win-build
+        timeout-minutes: 80
+        steps:
+            - name: Check out repository code
+              uses: actions/checkout@v2
+
+            - name: 🔎 Check IPs
+              shell: cmd
+              run: |
+                curl -4 icanhazip.com
+                echo ;
+                curl ipinfo.io/ip
+                echo ;
+                curl https://api.ipify.org
+              
+            - name: List inputs
+              shell: cmd
+              run: | 
+                echo Branch: ${{ github.ref_name }}
+                echo Infra: ${{ github.event.inputs.infra }}
+                echo Alpha devices: ${{ github.event.inputs.alpha }}
+
+            - name: Setup Artifactory
+              shell: cmd
+              run: |
+                echo @supernova:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @vxt:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @rmplayer:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:_password=${{ secrets.JFROG_AUTH }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:username=${{ secrets.JFROG_USERNAME }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:email=${{ secrets.JFROG_USERNAME }}@samsung.com >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:always-auth=true >> .npmrc
+
+            - name: NPM install
+              run: npm i
+            
+            - name: Build for Electron
+              run: |
+                npm run electron:build
+
+            - name: Prepare artifacts
+              run: |
+                mkdir artifacts/artifacts/Windows
+                cp ./resources/electron/build/*.exe ./artifacts/artifacts/Windows/
+                cp ./resources/electron/build/*.yml ./artifacts/artifacts/Windows/
+
+            - name: Build artifact
+              uses: actions/upload-artifact@v3
+              with:
+                name: build-artifact
+                path: |
+                    artifacts       
+    upload:
+        name: Upload to S3
+        runs-on: devops
+        needs: build-windows
+        steps:
+            - name: Download artifact 
+              uses: actions/download-artifact@v3
+              with:
+                name: build-artifact
+
+            - name: Configure AWS Credentials
+              uses: aws-actions/configure-aws-credentials@v3
+              with:
+                  aws-region: ${{ github.event.inputs.infra == 'dev' && 'ap-northeast-1' || github.event.inputs.infra == 'int' && 'ap-northeast-1' || github.event.inputs.infra == 'dev2' && 'ap-southeast-1' || github.event.inputs.infra == 'stg' && 'us-east-1' || github.event.inputs.infra == 'stg2' && 'eu-west-3' || 'eu-central-1'}}
+                  role-to-assume: ${{ github.event.inputs.infra == 'dev' && 'arn:aws:iam::490472793553:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'dev2' && 'arn:aws:iam::490472793553:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'int' && 'arn:aws:iam::703700361127:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'stg' && 'arn:aws:iam::703700361127:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'stg2' && 'arn:aws:iam::703700361127:role/VX_CMS_JENKINS_ROLE' || 'none'}}
+                  role-external-id: ${{ github.event.inputs.infra == 'dev' && secrets.ROLE_EXTERNAL_ID || github.event.inputs.infra == 'dev2' && secrets.ROLE_EXTERNAL_ID || github.event.inputs.infra == 'int' && secrets.ROLE_EXTERNAL_ID_STG || github.event.inputs.infra == 'stg' && secrets.ROLE_EXTERNAL_ID_STG || github.event.inputs.infra == 'stg2' && secrets.ROLE_EXTERNAL_ID_STG || 'none' }}
+                  role-session-name: GithubActionTest
+                  role-skip-session-tagging: true
+            
+            - name: Upload files
+              run: |
+                UTC_DATE_TIME=$(date -u +"%Y%m%d.%H%M")
+                INFRA="${{ github.event.inputs.infra }}"
+                if [ $INFRA == "dev" ]; then REGION="ap-northeast-1" ; elif [ $INFRA == "int" ]; then REGION="ap-northeast-1" ; elif [ $INFRA == "dev2" ]; then REGION="ap-southeast-1" ; elif [ $INFRA == "stg" ]; then REGION="us-east-1"; elif [ $INFRA == "stg2" ]; then REGION="eu-west-3"; else REGION="eu-central-1"; fi                
+                BUCKET_ID="fcms-player-artifacts-bucket-${INFRA}-${REGION}"
+                echo "***********************"
+                echo "** Available buckets **"
+                echo "***********************"
+                aws s3 ls
+                echo "*************************************"
+                echo "** Contents of bucket ${BUCKET_ID} **"
+                echo "*************************************"
+                aws s3 ls s3://${BUCKET_ID}
+                echo "***************"
+                echo "** Do backup **"
+                echo "***************"
+                aws s3 cp s3://${BUCKET_ID} s3://${BUCKET_ID}/backup/$UTC_DATE_TIME --recursive --exclude "backup/*" --expires 2099-01-01T20:30:00Z
+                echo "*****************************"
+                echo "** Uploading new artifacts **"
+                echo "*****************************"
+                aws s3 cp artifacts/Windows s3://${BUCKET_ID}/Windows --recursive
+    publishYml:
+      name: Publish YML file to infra bucket
+      runs-on: srpol-win-build
+      needs: upload
+      timeout-minutes: 40
+      steps:
+        - name: Upload Windows latest.yml to server
+          shell: cmd
+          run: |
+            set VITE_INFRA=${{ github.event.inputs.infra }}
+            set ALPHA=${{ github.event.inputs.alpha }}
+            npm run electron:publishYml

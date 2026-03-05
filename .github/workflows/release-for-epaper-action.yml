@@ -1,0 +1,84 @@
+name: Release vxtplayer for E-Paper
+on:
+    workflow_dispatch:
+        inputs:
+            infra:
+                description: 'Select infrastructure'
+                required: true
+                default: 'dev2'
+                type: choice
+                options:
+                    - dev
+                    - dev2
+                    - int
+                    - stg
+                    - stg2
+                    # - prd # disabled for now
+            alpha:
+                description: 'Input screenIds for Alpha test release'
+                required: false
+                default: ''
+                type: string
+
+jobs:
+    build-windows:
+        name: Build all platforms on Windows runner
+        runs-on: srpol-win-build
+        timeout-minutes: 80
+        steps:
+            - name: Check out repository code
+              uses: actions/checkout@v2
+
+            - name: 🔎 Check IPs
+              shell: cmd
+              run: |
+                curl -4 icanhazip.com
+                echo ;
+                curl ipinfo.io/ip
+                echo ;
+                curl https://api.ipify.org
+
+            - name: List inputs
+              shell: cmd
+              run: |
+                echo Branch: ${{ github.ref_name }}
+                echo Infra: ${{ github.event.inputs.infra }}
+                echo Alpha devices: ${{ github.event.inputs.alpha }}
+
+            - name: Setup Artifactory
+              shell: cmd
+              run: |
+                echo @supernova:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @vxt:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo @rmplayer:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/ >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:_password=${{ secrets.JFROG_AUTH }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:username=${{ secrets.JFROG_USERNAME }} >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:email=${{ secrets.JFROG_USERNAME }}@samsung.com >> .npmrc
+                echo //bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:always-auth=true >> .npmrc
+
+            - name: NPM install
+              run: npm i
+
+            - name: Build for Tizen E
+              run: |
+                sed -i 's/\[CERTIFICATE NAME HERE\]/vxt-user/g' ./settings/tizen-settings-template.js
+                ls ./settings
+                sed -i 's/\[CERTIFICATE NAME HERE\]/vxt-user/g' ./settings/tizen-settings.js
+                npm run setup -- platform=tizen player=vxplayer version=E
+                npx cordova prepare tizen
+                npx cordova build tizen
+                ls platforms/
+
+            - name: Prepare artifacts
+              run: |
+                mkdir artifacts/artifacts/Tizen
+                cp ./platforms/tizen/build/*.wgt ./artifacts/artifacts/Tizen/
+
+            - name: Build artifact
+              uses: actions/upload-artifact@v3
+              with:
+                name: build-artifact
+                path: |
+                    artifacts
+
+

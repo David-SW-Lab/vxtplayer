@@ -1,0 +1,81 @@
+name: 📋 Release Notes Generator
+
+on:
+  # 수동 실행 (버전 지정)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '릴리즈 버전 (예: 3.1.37)'
+        required: true
+      from_ref:
+        description: '비교 시작점 (이전 태그/커밋 SHA/PR번호) — 비워두면 이전 태그 자동 감지'
+        required: false
+        default: ''
+      to_ref:
+        description: '비교 끝점 (기본값: HEAD)'
+        required: false
+        default: 'HEAD'
+      export_to:
+        description: '내보내기 대상'
+        type: choice
+        options:
+          - both
+          - excel
+          - confluence
+        default: both
+
+  # 릴리즈 워크플로우 성공 후 자동 실행
+  workflow_run:
+    workflows:
+      - 'Release Action'
+      - 'Release Action Optimized'
+    types: [completed]
+
+jobs:
+  generate:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install xlsx
+
+      - name: Generate release notes
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          REPO:               ${{ github.repository }}
+          VERSION:            ${{ inputs.version || github.event.workflow_run.head_branch }}
+          FROM_REF:           ${{ inputs.from_ref }}
+          TO_REF:             ${{ inputs.to_ref || 'HEAD' }}
+          EXPORT_TO:          ${{ inputs.export_to || 'both' }}
+          # Confluence (Secrets에서 설정)
+          CONFLUENCE_BASE_URL:      ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_TOKEN:         ${{ secrets.CONFLUENCE_TOKEN }}
+          CONFLUENCE_SPACE_KEY:     ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          CONFLUENCE_PARENT_PAGE_ID: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID }}
+        run: node .github/scripts/release-notes.js
+
+      - name: Upload Excel artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-notes-${{ inputs.version || 'auto' }}
+          path: release-notes-*.xlsx
+          if-no-files-found: ignore

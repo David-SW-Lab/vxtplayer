@@ -1,0 +1,17 @@
+name: Workflow For AWS Resource access
+on:
+  workflow_dispatch:
+jobs:
+    build:
+      name: List all Buckets
+      runs-on: jst-pc
+      steps:
+        - name: Configure AWS Credentials
+          uses: aws-actions/configure-aws-credentials@v3
+          with:
+            aws-region: ap-northeast-1
+            role-to-assume: arn:aws:iam::490472793553:role/VX_CMS_JENKINS_ROLE
+            role-external-id: ${{ secrets.ROLE_EXTERNAL_ID}}
+            role-session-name: GithubActionTest
+            role-skip-session-tagging: true
+        - run: aws s3 ls 

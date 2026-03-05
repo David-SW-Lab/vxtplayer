@@ -1,0 +1,155 @@
+name: Release for Android
+on:
+    workflow_dispatch:
+        inputs:
+            infra:
+                description: 'Select infrastructure'
+                required: false
+                default: 'dev2'
+                type: choice
+                options:
+                    - dev2
+                    - stg2
+
+jobs:
+  build:
+    runs-on: [ code-linux, code-large ]
+    container:
+      image: ubuntu:22.04
+      options: --user root
+    timeout-minutes: 30
+
+    steps:
+      - name: Install container dependencies
+        run: apt-get update && apt-get install git unzip jq -y
+
+      - name: Check out repository code
+        uses: actions/checkout@v2
+        with:
+          submodules: 'recursive'
+          token: ${{ secrets.TOKEN_GITHUB_KS315 }}
+
+      - name: VXT Player pull from main
+        run: |
+          git fetch
+          git reset --hard origin/main
+          git checkout main
+          git pull
+          git log -1 --oneline HEAD
+
+      - name: Submodules pull from master
+        run: |     
+          cd ./libs/android-rmplayer
+          git fetch
+          git reset --hard origin/master
+          git checkout master
+          git pull
+          git log -1 --oneline HEAD
+          cd ../../
+
+      - name: Extract version from package.json
+        id: extract_version
+        run: echo "VXTVERSION=$(jq -r '.version' package.json)" >> $GITHUB_ENV
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '18.12.1'
+
+      - name: Setup npm version
+        run: npm install -g npm@8.3.1
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+    
+      - name: Set up Gradle
+        uses: gradle/gradle-build-action@v2
+        with:
+          gradle-version: '7.4.2'
+
+      - name: Set Gradle path
+        run: echo "${{ steps.setup-gradle.outputs.gradle-home }}" >> $GITHUB_PATH
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Android Build Tools 34.0.0
+        run: sdkmanager "build-tools;34.0.0"
+
+      - name: Setup Artifactory
+        run: |
+          echo "@supernova:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/" >> .npmrc
+          echo "@vxt:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/" >> .npmrc
+          echo "@rmplayer:registry=https://bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:_password=${{ secrets.JFROG_AUTH }}" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:username=${{ secrets.JFROG_USERNAME }}" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:email=${{ secrets.JFROG_USERNAME }}@samsung.com" >> .npmrc
+          echo "//bart.ecodesamsung.com/artifactory/api/npm/vd-smarttvserver-npm-local/:always-auth=true" >> .npmrc
+
+      - name: Npm Install
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true'
+        run: npm install
+
+      - name: Cordova prepare
+        run: |
+          npm run setup -- platform=android player=vxplayer
+          npx cordova prepare android
+
+      - name: Cordova build
+        run : |
+          npx cordova build android
+          npm run android:production
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/artifacts/Android
+          cp ./platforms/android/app/build/outputs/apk/debug/*.apk ./artifacts/artifacts/Android/
+          cp ./platforms/android/app/build/outputs/bundle/release/*.aab ./artifacts/artifacts/Android/
+
+      - name: Update APK name
+        run: |
+          mv ./artifacts/artifacts/Android/*.apk ./artifacts/artifacts/Android/VXTPlayer-${VXTVERSION}.apk
+          mv ./artifacts/artifacts/Android/*.aab ./artifacts/artifacts/Android/VXTPlayer-${VXTVERSION}.aab
+
+      - name: Build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-artifacts
+          path: |
+              artifacts
+
+  upload:
+      name: Upload to S3
+      runs-on: devops
+      needs: build
+      steps:
+          - name: Download artifact 
+            uses: actions/download-artifact@v3
+            with:
+              name: android-artifacts
+
+          - name: Configure AWS Credentials
+            uses: aws-actions/configure-aws-credentials@v3
+            with:
+                aws-region: ${{ github.event.inputs.infra == 'dev' && 'ap-northeast-1' || github.event.inputs.infra == 'int' && 'ap-northeast-1' || github.event.inputs.infra == 'dev2' && 'ap-southeast-1' || github.event.inputs.infra == 'stg' && 'us-east-1' || github.event.inputs.infra == 'stg2' && 'eu-west-3' || 'eu-central-1'}}
+                role-to-assume: ${{ github.event.inputs.infra == 'dev' && 'arn:aws:iam::490472793553:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'dev2' && 'arn:aws:iam::490472793553:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'int' && 'arn:aws:iam::703700361127:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'stg' && 'arn:aws:iam::703700361127:role/VX_CMS_JENKINS_ROLE' || github.event.inputs.infra == 'stg2' && 'arn:aws:iam::703700361127:role/VX_CMS_JENKINS_ROLE' || 'none'}}
+                role-external-id: ${{ github.event.inputs.infra == 'dev' && secrets.ROLE_EXTERNAL_ID || github.event.inputs.infra == 'dev2' && secrets.ROLE_EXTERNAL_ID || github.event.inputs.infra == 'int' && secrets.ROLE_EXTERNAL_ID_STG || github.event.inputs.infra == 'stg' && secrets.ROLE_EXTERNAL_ID_STG || github.event.inputs.infra == 'stg2' && secrets.ROLE_EXTERNAL_ID_STG || 'none' }}
+                role-session-name: GithubActionTest
+                role-skip-session-tagging: true
+                
+          - name: Available buckets
+            run: aws s3 ls
+
+          - name: Upload to artifacts
+            run: |
+              INFRA="${{ github.event.inputs.infra }}"
+              if [ $INFRA == "dev" ]; then REGION="ap-northeast-1" ; elif [ $INFRA == "int" ]; then REGION="ap-northeast-1" ; elif [ $INFRA == "dev2" ]; then REGION="ap-southeast-1" ; elif [ $INFRA == "stg" ]; then REGION="us-east-1"; elif [ $INFRA == "stg2" ]; then REGION="eu-west-3"; else REGION="eu-central-1"; fi                
+              BUCKET_ID="fcms-player-artifacts-bucket-${INFRA}-${REGION}"
+              echo "** Contents of bucket ${BUCKET_ID} **"
+              aws s3 ls s3://${BUCKET_ID}
+              aws s3 cp artifacts/Android s3://${BUCKET_ID}/Android --recursive
